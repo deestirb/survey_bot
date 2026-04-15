@@ -3,7 +3,7 @@ import sqlite3
 import json
 from questions import QUESTIONS
 
-DB_FILE = "survey_results.db"
+DB_FILE = "/data/survey_results.db"
 
 
 def get_column_names():
