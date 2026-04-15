@@ -1,0 +1,5 @@
+venv/
+.env
+survey_results.db
+__pycache__/
+*.pyc
