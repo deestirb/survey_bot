@@ -1,5 +1,6 @@
 # bot.py
 import os
+import random
 import logging
 from datetime import datetime
 
@@ -15,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from questions import QUESTIONS
+from questions import QUESTIONS, RANDOMIZE_GROUPS
 from database import init_db, create_response_row, save_answer, finalize_response, get_stats
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
@@ -35,13 +36,65 @@ SURVEY = 1
 ADMIN_USER_ID = 123456789  # ← REPLACE WITH YOUR TELEGRAM USER ID
 
 
-# ── Helper: build question text ────────────────────────────────────────────────
+# ── Randomization ──────────────────────────────────────────────────────────────
 
-def build_question_text(question_index):
-    """Format the question text with a progress indicator."""
-    q = QUESTIONS[question_index]
-    total = len(QUESTIONS)
-    text = f"*Вопрос {question_index + 1} из {total}*\n\n{q['text']}"
+def build_question_order():
+    """
+    Build the question order for one respondent session.
+
+    Questions inside RANDOMIZE_GROUPS have their internal order shuffled.
+    All other questions remain in their original positions.
+    Returns a list of indices into QUESTIONS (length == len(QUESTIONS)).
+    """
+    # Map question id → position in QUESTIONS
+    id_to_idx = {q["id"]: i for i, q in enumerate(QUESTIONS)}
+
+    # Start with the default sequential order
+    order = list(range(len(QUESTIONS)))
+
+    for group_ids in RANDOMIZE_GROUPS:
+        # Resolve ids to indices; skip any unknown ids silently
+        group_indices = [id_to_idx[qid] for qid in group_ids if qid in id_to_idx]
+        if not group_indices:
+            continue
+
+        # Find where these indices sit in the current order
+        positions_in_order = [order.index(qi) for qi in group_indices]
+        first_pos = min(positions_in_order)
+
+        # Shuffle the group and write it back into the same slice of order
+        shuffled = group_indices[:]
+        random.shuffle(shuffled)
+        for offset, q_idx in enumerate(shuffled):
+            order[first_pos + offset] = q_idx
+
+    return order
+
+
+# ── Progress bar ───────────────────────────────────────────────────────────────
+
+def progress_bar(step, total):
+    """
+    Return a single-line progress indicator, e.g. '▓▓▓░░░░░░░  30%'
+    step is 0-based; total is the total number of steps.
+    """
+    pct = round((step / total) * 100)
+    filled = round(pct / 10)
+    bar = "▓" * filled + "░" * (10 - filled)
+    return f"{bar}  {pct}%"
+
+
+# ── Build question text ────────────────────────────────────────────────────────
+
+def build_question_text(q_idx, step, total_steps):
+    """
+    Format the question for display.
+    Shows a percentage progress bar instead of 'Question N of M'
+    so as not to discourage respondents.
+    """
+    q = QUESTIONS[q_idx]
+    header = progress_bar(step, total_steps) + "\n\n"
+    text = header + q["text"]
 
     if q["type"] == "multi_choice":
         max_c = q.get("max_choices")
@@ -51,132 +104,127 @@ def build_question_text(question_index):
     return text
 
 
-# ── Helper: build keyboard ─────────────────────────────────────────────────────
+# ── Build keyboard ─────────────────────────────────────────────────────────────
 #
-# IMPORTANT: Telegram enforces a 64-byte hard limit on callback_data.
-# Long Russian option strings would exceed this instantly, so we never put
-# option text into callback_data. Instead we pass small integer indices and
-# look up the real text in the handler.
+# Telegram enforces a 64-byte hard limit on callback_data.
+# We never put option text into callback_data — only small integers.
 #
-# callback_data formats used (all well under 64 bytes):
-#   "a|{q_idx}|{opt_idx}"   — single answer (choice / scale / integer fallback)
-#   "t|{q_idx}|{opt_idx}"   — toggle a multi_choice option on/off
-#   "c|{q_idx}"             — confirm multi_choice selection
-#   "b|{q_idx}"             — go back to the previous question
+# callback_data formats (all well under 64 bytes):
+#   "a|{step}|{opt_idx}"  — single answer chosen
+#   "t|{step}|{opt_idx}"  — toggle a multi_choice option
+#   "c|{step}"            — confirm multi_choice selection
+#   "b|{step}"            — go back to previous step
 
-def build_keyboard(question_index, selected_indices=None):
+def build_keyboard(q_idx, step, selected_indices=None):
     """
     Build the inline keyboard for any question type.
-    'selected_indices' is a set of option indices (ints) for multi_choice questions.
+    'selected_indices' is a set of option indices for multi_choice questions.
     """
-    q = QUESTIONS[question_index]
+    q = QUESTIONS[q_idx]
     keyboard = []
     selected_indices = selected_indices or set()
-    qi = question_index
 
     if q["type"] == "choice":
         for oi, option in enumerate(q["options"]):
             keyboard.append([
-                InlineKeyboardButton(option, callback_data=f"a|{qi}|{oi}")
+                InlineKeyboardButton(option, callback_data=f"a|{step}|{oi}")
             ])
 
     elif q["type"] == "scale":
         min_val = q.get("min", 1)
         max_val = q.get("max", 5)
         row = [
-            InlineKeyboardButton(str(v), callback_data=f"a|{qi}|{oi}")
+            InlineKeyboardButton(str(v), callback_data=f"a|{step}|{oi}")
             for oi, v in enumerate(range(min_val, max_val + 1))
         ]
         keyboard.append(row)
 
     elif q["type"] == "integer":
-        # No main buttons — the user types the number freely.
-        # Only show fallback escape options as buttons.
+        # User types the number; only show fallback escape buttons.
         for oi, option in enumerate(q.get("fallback_options", [])):
             keyboard.append([
-                InlineKeyboardButton(option, callback_data=f"a|{qi}|{oi}")
+                InlineKeyboardButton(option, callback_data=f"a|{step}|{oi}")
             ])
+
+    elif q["type"] == "text":
+        # Purely free-text — no option buttons, only Back if applicable.
+        pass
 
     elif q["type"] == "multi_choice":
         for oi, option in enumerate(q["options"]):
             label = f"✓  {option}" if oi in selected_indices else option
             keyboard.append([
-                InlineKeyboardButton(label, callback_data=f"t|{qi}|{oi}")
+                InlineKeyboardButton(label, callback_data=f"t|{step}|{oi}")
             ])
         if selected_indices:
             keyboard.append([
-                InlineKeyboardButton("✅  Подтвердить выбор", callback_data=f"c|{qi}")
+                InlineKeyboardButton("✅  Подтвердить выбор", callback_data=f"c|{step}")
             ])
 
-    # Back button on every question except the first
-    if question_index > 0:
+    # Back button on every step except the very first
+    if step > 0:
         keyboard.append([
-            InlineKeyboardButton("← Назад", callback_data=f"b|{qi}")
+            InlineKeyboardButton("← Назад", callback_data=f"b|{step}")
         ])
 
     return InlineKeyboardMarkup(keyboard)
 
 
-# ── Helper: resolve the display text for a selected option index ───────────────
+# ── Resolve option text from index ────────────────────────────────────────────
 
-def option_text(question_index, opt_index):
-    """
-    Return the display text for a given option index.
-    Handles choice, multi_choice, scale, and integer fallback uniformly.
-    """
-    q = QUESTIONS[question_index]
-
+def option_text(q_idx, opt_idx):
+    """Return the display text for a given option index."""
+    q = QUESTIONS[q_idx]
     if q["type"] == "scale":
-        min_val = q.get("min", 1)
-        return str(min_val + opt_index)
-
+        return str(q.get("min", 1) + opt_idx)
     if q["type"] == "integer":
-        return q["fallback_options"][opt_index]
+        return q["fallback_options"][opt_idx]
+    return q["options"][opt_idx]
 
-    return q["options"][opt_index]
 
+# ── Advance to next step or finish ────────────────────────────────────────────
 
-# ── Helper: advance to the next question or finish the survey ──────────────────
-
-async def _advance(target, context, question_index, now, *, is_message=False):
+async def _advance(target, context, current_step, now, *, is_message=False):
     """
-    Move to the next question after an answer has been recorded.
-    'target' is either a CallbackQuery or a Message object.
+    Move to the next step after an answer has been saved.
+    'target' is a CallbackQuery or a Message object.
     """
-    next_index = question_index + 1
-    context.user_data["current_question"] = next_index
+    question_order = context.user_data["question_order"]
+    next_step = current_step + 1
+    context.user_data["current_step"] = next_step
     context.user_data["question_start"] = now
 
-    if next_index >= len(QUESTIONS):
-        end_time = now
-        total_seconds = (end_time - context.user_data["survey_start"]).total_seconds()
+    # ── Survey complete ────────────────────────────────────────────────────
+    if next_step >= len(question_order):
+        total_seconds = (now - context.user_data["survey_start"]).total_seconds()
         total_minutes = round(total_seconds / 60, 1)
 
         finalize_response(
             row_id=context.user_data["row_id"],
-            end_time=end_time.isoformat(),
+            end_time=now.isoformat(),
             total_seconds=total_seconds
         )
 
         completion_text = (
-            f"✅ *Опрос завершён!*\n\n"
-            f"Спасибо за участие! Вы ответили на все {len(QUESTIONS)} вопросов "
+            "✅ *Опрос завершён!*\n\n"
+            f"Спасибо за участие! Вы ответили на все вопросы "
             f"за *{total_minutes} минут(-ы)*.\n\nВаши ответы сохранены."
         )
         if is_message:
             await target.reply_text(completion_text, parse_mode="Markdown")
         else:
             await target.edit_message_text(completion_text, parse_mode="Markdown")
-
         return ConversationHandler.END
 
-    next_text = build_question_text(next_index)
-    next_kb = build_keyboard(next_index)
+    # ── Show next question ─────────────────────────────────────────────────
+    next_q_idx = question_order[next_step]
+    text = build_question_text(next_q_idx, next_step, len(question_order))
+    kb = build_keyboard(next_q_idx, next_step)
 
     if is_message:
-        await target.reply_text(next_text, reply_markup=next_kb, parse_mode="Markdown")
+        await target.reply_text(text, reply_markup=kb, parse_mode="Markdown")
     else:
-        await target.edit_message_text(next_text, reply_markup=next_kb, parse_mode="Markdown")
+        await target.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
 
     return SURVEY
 
@@ -187,9 +235,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     now = datetime.now()
 
-    context.user_data["current_question"] = 0
-    context.user_data["answers"] = {}
-    context.user_data["question_times"] = {}
+    question_order = build_question_order()
+
+    context.user_data["question_order"] = question_order
+    context.user_data["current_step"] = 0
+    context.user_data["answers"] = {}         # {q_idx: answer_text}
+    context.user_data["question_times"] = {}  # {q_idx: seconds_spent}
     context.user_data["survey_start"] = now
     context.user_data["question_start"] = now
 
@@ -202,18 +253,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["row_id"] = row_id
 
     await update.message.reply_text(
-        f"Здравствуйте, {user.first_name}! Добро пожаловать в опрос.\n\n"
-        f"Всего *{len(QUESTIONS)} вопросов*. На каждом вопросе есть кнопка "
-        f"«← Назад», если захотите изменить предыдущий ответ.\n\nНачнём!",
+        f"Здравствуйте, {user.first_name}!\n\n"
+        "Вас приветствует социологический опрос. "
+        "Заполнение займёт примерно *10–15 минут*.\n\n"
+        "🔒 *Анонимность:* все ответы полностью анонимны. "
+        "Ваши личные данные не собираются и не передаются третьим лицам.\n\n"
+        "На каждом вопросе есть кнопка «← Назад», "
+        "если захотите изменить предыдущий ответ.\n\n"
+        "Начнём!",
         parse_mode="Markdown"
     )
 
+    first_q_idx = question_order[0]
     await update.message.reply_text(
-        build_question_text(0),
-        reply_markup=build_keyboard(0),
+        build_question_text(first_q_idx, 0, len(question_order)),
+        reply_markup=build_keyboard(first_q_idx, 0),
         parse_mode="Markdown"
     )
-
     return SURVEY
 
 
@@ -227,47 +283,55 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[0]
     now = datetime.now()
 
+    question_order = context.user_data["question_order"]
+
     # ── BACK ──────────────────────────────────────────────────────────────
     if action == "b":
-        current_index = int(parts[1])
-        prev_index = current_index - 1
+        current_step = int(parts[1])
+        prev_step = current_step - 1
+        current_q_idx = question_order[current_step]
+        prev_q_idx = question_order[prev_step]
 
+        # Accumulate time on the step being left
         elapsed = (now - context.user_data.get("question_start", now)).total_seconds()
-        existing = context.user_data["question_times"].get(current_index, 0)
-        context.user_data["question_times"][current_index] = existing + elapsed
+        existing = context.user_data["question_times"].get(current_q_idx, 0)
+        context.user_data["question_times"][current_q_idx] = existing + elapsed
 
-        context.user_data.pop(f"mc_{current_index}", None)
-        context.user_data["current_question"] = prev_index
+        # Discard in-progress multi_choice selection on the step being left
+        context.user_data.pop(f"mc_{current_step}", None)
+
+        context.user_data["current_step"] = prev_step
         context.user_data["question_start"] = now
 
-        prev_answer = context.user_data["answers"].get(prev_index)
+        prev_answer = context.user_data["answers"].get(prev_q_idx)
         extra = f"\n\n_Ваш предыдущий ответ: *{prev_answer}*_" if prev_answer else ""
 
-        # Restore tick state when going back to a multi_choice question
-        prev_q = QUESTIONS[prev_index]
+        # Restore tick state if going back to a multi_choice question
+        prev_q = QUESTIONS[prev_q_idx]
         selected_indices = set()
         if prev_q["type"] == "multi_choice" and prev_answer:
             saved_texts = prev_answer.split(" | ")
             for oi, opt in enumerate(prev_q["options"]):
                 if opt in saved_texts:
                     selected_indices.add(oi)
-            context.user_data[f"mc_{prev_index}"] = selected_indices
+            context.user_data[f"mc_{prev_step}"] = selected_indices
 
         await query.edit_message_text(
-            build_question_text(prev_index) + extra,
-            reply_markup=build_keyboard(prev_index, selected_indices=selected_indices),
+            build_question_text(prev_q_idx, prev_step, len(question_order)) + extra,
+            reply_markup=build_keyboard(prev_q_idx, prev_step, selected_indices),
             parse_mode="Markdown"
         )
         return SURVEY
 
-    # ── TOGGLE multi_choice option ────────────────────────────────────────
+    # ── TOGGLE multi_choice ───────────────────────────────────────────────
     if action == "t":
-        question_index = int(parts[1])
+        step = int(parts[1])
         opt_index = int(parts[2])
-        q = QUESTIONS[question_index]
+        q_idx = question_order[step]
+        q = QUESTIONS[q_idx]
         max_choices = q.get("max_choices")
 
-        key = f"mc_{question_index}"
+        key = f"mc_{step}"
         selected_indices = context.user_data.get(key, set())
 
         if opt_index in selected_indices:
@@ -284,107 +348,126 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[key] = selected_indices
 
         await query.edit_message_text(
-            build_question_text(question_index),
-            reply_markup=build_keyboard(question_index, selected_indices=selected_indices),
+            build_question_text(q_idx, step, len(question_order)),
+            reply_markup=build_keyboard(q_idx, step, selected_indices),
             parse_mode="Markdown"
         )
         return SURVEY
 
     # ── CONFIRM multi_choice ──────────────────────────────────────────────
     if action == "c":
-        question_index = int(parts[1])
-        key = f"mc_{question_index}"
+        step = int(parts[1])
+        q_idx = question_order[step]
+        key = f"mc_{step}"
         selected_indices = context.user_data.get(key, set())
 
         if not selected_indices:
             await query.answer("Пожалуйста, выберите хотя бы один вариант.", show_alert=True)
             return SURVEY
 
-        q = QUESTIONS[question_index]
+        q = QUESTIONS[q_idx]
         ordered_texts = [q["options"][oi] for oi in sorted(selected_indices)]
         answer = " | ".join(ordered_texts)
 
         elapsed = (now - context.user_data.get("question_start", now)).total_seconds()
-        existing = context.user_data["question_times"].get(question_index, 0)
+        existing = context.user_data["question_times"].get(q_idx, 0)
         total_q_seconds = existing + elapsed
 
-        context.user_data["question_times"][question_index] = total_q_seconds
-        context.user_data["answers"][question_index] = answer
+        context.user_data["question_times"][q_idx] = total_q_seconds
+        context.user_data["answers"][q_idx] = answer
         context.user_data.pop(key, None)
 
         save_answer(
             row_id=context.user_data["row_id"],
-            question_index=question_index,
+            question_index=q_idx,
             answer=answer,
             seconds_spent=total_q_seconds
         )
+        return await _advance(query, context, step, now)
 
-        return await _advance(query, context, question_index, now)
-
-    # ── SINGLE ANSWER (choice / scale / integer fallback button) ──────────
+    # ── SINGLE ANSWER (choice / scale / integer fallback) ─────────────────
     if action == "a":
-        question_index = int(parts[1])
+        step = int(parts[1])
         opt_index = int(parts[2])
-        answer = option_text(question_index, opt_index)
+        q_idx = question_order[step]
+        answer = option_text(q_idx, opt_index)
 
         elapsed = (now - context.user_data.get("question_start", now)).total_seconds()
-        existing = context.user_data["question_times"].get(question_index, 0)
+        existing = context.user_data["question_times"].get(q_idx, 0)
         total_q_seconds = existing + elapsed
 
-        context.user_data["question_times"][question_index] = total_q_seconds
-        context.user_data["answers"][question_index] = answer
+        context.user_data["question_times"][q_idx] = total_q_seconds
+        context.user_data["answers"][q_idx] = answer
 
         save_answer(
             row_id=context.user_data["row_id"],
-            question_index=question_index,
+            question_index=q_idx,
             answer=answer,
             seconds_spent=total_q_seconds
         )
+        return await _advance(query, context, step, now)
 
-        return await _advance(query, context, question_index, now)
 
-
-# ── Message handler: typed numeric input for "integer" questions ───────────────
+# ── Message handler: typed input for "integer" and "text" questions ────────────
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
-    current_index = context.user_data.get("current_question", 0)
-    q = QUESTIONS[current_index]
+    question_order = context.user_data.get("question_order", [])
+    current_step = context.user_data.get("current_step", 0)
 
-    if q["type"] != "integer":
+    if not question_order:
+        await update.message.reply_text(
+            "Отправьте /start чтобы начать опрос."
+        )
+        return SURVEY
+
+    q_idx = question_order[current_step]
+    q = QUESTIONS[q_idx]
+
+    # ── "integer" type ────────────────────────────────────────────────────
+    if q["type"] == "integer":
+        raw = update.message.text.strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            await update.message.reply_text(
+                "Пожалуйста, введите целое положительное число.\n"
+                "Например: *25* (для возраста) или *50000* (для зарплаты).",
+                parse_mode="Markdown"
+            )
+            return SURVEY
+        answer = raw
+
+    # ── "text" type ───────────────────────────────────────────────────────
+    elif q["type"] == "text":
+        answer = update.message.text.strip()
+        if not answer:
+            await update.message.reply_text(
+                "Пожалуйста, введите Ваш ответ текстом и отправьте его."
+            )
+            return SURVEY
+
+    # ── Any other type: remind to use buttons ─────────────────────────────
+    else:
         await update.message.reply_text(
             "Пожалуйста, используйте кнопки для ответа на этот вопрос. "
             "Если кнопки не видны, отправьте /start чтобы начать заново."
         )
         return SURVEY
 
-    raw = update.message.text.strip()
-
-    if not raw.isdigit() or int(raw) <= 0:
-        await update.message.reply_text(
-            "Пожалуйста, введите целое положительное число.\n"
-            "Например: *25* (для возраста) или *50000* (для зарплаты).",
-            parse_mode="Markdown"
-        )
-        return SURVEY
-
-    answer = raw
-
     elapsed = (now - context.user_data.get("question_start", now)).total_seconds()
-    existing = context.user_data["question_times"].get(current_index, 0)
+    existing = context.user_data["question_times"].get(q_idx, 0)
     total_q_seconds = existing + elapsed
 
-    context.user_data["question_times"][current_index] = total_q_seconds
-    context.user_data["answers"][current_index] = answer
+    context.user_data["question_times"][q_idx] = total_q_seconds
+    context.user_data["answers"][q_idx] = answer
 
     save_answer(
         row_id=context.user_data["row_id"],
-        question_index=current_index,
+        question_index=q_idx,
         answer=answer,
         seconds_spent=total_q_seconds
     )
 
-    return await _advance(update.message, context, current_index, now, is_message=True)
+    return await _advance(update.message, context, current_step, now, is_message=True)
 
 
 # ── Command: /stats (admin only) ──────────────────────────────────────────────
