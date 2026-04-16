@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 SURVEY = 1
 
 # Find your Telegram user ID by messaging @userinfobot on Telegram.
-ADMIN_USER_ID = 123456789  # ← REPLACE WITH YOUR TELEGRAM USER ID
+ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
 
 
 # ── Randomization ──────────────────────────────────────────────────────────────
