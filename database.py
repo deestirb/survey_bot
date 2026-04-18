@@ -1,14 +1,18 @@
 # database.py
+import os
 import sqlite3
 from questions import QUESTIONS
 
-DB_FILE = "/data/survey_results.db"
-# ↑ This path is for Railway (persistent volume).
-#   For local testing, change to: DB_FILE = "survey_results.db"
+# Use environment variable if set (Railway), otherwise local file
+DB_FILE = os.getenv("DB_FILE", "survey_results.db")
 
 
 def init_db():
-    """Create the database and responses table if they don't exist yet."""
+    """
+    Create the database and responses table if they don't exist yet.
+    Also runs any migrations needed for older databases (e.g. adding
+    the 'condition' column if it was created before that was added).
+    """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -25,7 +29,7 @@ def init_db():
             user_id         INTEGER,
             username        TEXT,
             first_name      TEXT,
-            condition       TEXT,       -- 'bot' or 'web'
+            condition       TEXT,
             start_time      TEXT,
             end_time        TEXT,
             total_seconds   REAL,
@@ -33,6 +37,14 @@ def init_db():
             {dynamic_cols_sql}
         )
     """)
+
+    # ── Migrations: safely add any columns missing from older databases ────
+    existing_cols = [row[1] for row in cursor.execute("PRAGMA table_info(responses)")]
+
+    if "condition" not in existing_cols:
+        cursor.execute("ALTER TABLE responses ADD COLUMN condition TEXT")
+        print("Migration: added 'condition' column.")
+
     conn.commit()
     conn.close()
     print("Database ready.")
@@ -43,7 +55,7 @@ def create_response_row(user_id, username, first_name, start_time, condition="bo
     Insert a new row when a participant starts (either condition).
     Returns the row ID so we can update it as answers come in.
     Web-condition rows will have completed=0 and no answer columns filled —
-    this is intentional so you can count redirects vs completions.
+    this lets you count redirects vs completions.
     """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
