@@ -32,37 +32,31 @@ logger = logging.getLogger(__name__)
 
 SURVEY = 1
 
-# Find your Telegram user ID by messaging @userinfobot on Telegram.
+# ↓ Your Telegram user ID — message @userinfobot on Telegram to find it
 ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
 
+# ↓ Paste the full URL of your web survey here
+WEB_SURVEY_URL = "https://www.oneclicksurvey.com/a/4b794b67"  # ← REPLACE WITH YOUR LINK
 
-# ── Randomization ──────────────────────────────────────────────────────────────
+
+# ── Randomization: question order within matrix blocks ─────────────────────────
 
 def build_question_order():
     """
-    Build the question order for one respondent session.
-
-    Questions inside RANDOMIZE_GROUPS have their internal order shuffled.
-    All other questions remain in their original positions.
-    Returns a list of indices into QUESTIONS (length == len(QUESTIONS)).
+    Build a per-respondent question order.
+    Questions inside RANDOMIZE_GROUPS are shuffled within their block.
+    All other questions stay in their original positions.
+    Returns a list of indices into QUESTIONS.
     """
-    # Map question id → position in QUESTIONS
     id_to_idx = {q["id"]: i for i, q in enumerate(QUESTIONS)}
-
-    # Start with the default sequential order
     order = list(range(len(QUESTIONS)))
 
     for group_ids in RANDOMIZE_GROUPS:
-        # Resolve ids to indices; skip any unknown ids silently
         group_indices = [id_to_idx[qid] for qid in group_ids if qid in id_to_idx]
         if not group_indices:
             continue
-
-        # Find where these indices sit in the current order
-        positions_in_order = [order.index(qi) for qi in group_indices]
-        first_pos = min(positions_in_order)
-
-        # Shuffle the group and write it back into the same slice of order
+        positions = [order.index(qi) for qi in group_indices]
+        first_pos = min(positions)
         shuffled = group_indices[:]
         random.shuffle(shuffled)
         for offset, q_idx in enumerate(shuffled):
@@ -74,24 +68,17 @@ def build_question_order():
 # ── Progress bar ───────────────────────────────────────────────────────────────
 
 def progress_bar(step, total):
-    """
-    Return a single-line progress indicator, e.g. '▓▓▓░░░░░░░  30%'
-    step is 0-based; total is the total number of steps.
-    """
+    """Return a visual progress indicator, e.g. '▓▓▓░░░░░░░  30%'"""
     pct = round((step / total) * 100)
     filled = round(pct / 10)
     bar = "▓" * filled + "░" * (10 - filled)
     return f"{bar}  {pct}%"
 
 
-# ── Build question text ────────────────────────────────────────────────────────
+# ── Question text ──────────────────────────────────────────────────────────────
 
 def build_question_text(q_idx, step, total_steps):
-    """
-    Format the question for display.
-    Shows a percentage progress bar instead of 'Question N of M'
-    so as not to discourage respondents.
-    """
+    """Format question text with a percentage progress bar."""
     q = QUESTIONS[q_idx]
     header = progress_bar(step, total_steps) + "\n\n"
     text = header + q["text"]
@@ -104,22 +91,19 @@ def build_question_text(q_idx, step, total_steps):
     return text
 
 
-# ── Build keyboard ─────────────────────────────────────────────────────────────
+# ── Keyboard builder ───────────────────────────────────────────────────────────
 #
 # Telegram enforces a 64-byte hard limit on callback_data.
-# We never put option text into callback_data — only small integers.
+# We only put small integers in callback_data, never option text.
 #
-# callback_data formats (all well under 64 bytes):
-#   "a|{step}|{opt_idx}"  — single answer chosen
+# callback_data formats:
+#   "a|{step}|{opt_idx}"  — single answer (choice / scale / integer fallback)
 #   "t|{step}|{opt_idx}"  — toggle a multi_choice option
 #   "c|{step}"            — confirm multi_choice selection
 #   "b|{step}"            — go back to previous step
 
 def build_keyboard(q_idx, step, selected_indices=None):
-    """
-    Build the inline keyboard for any question type.
-    'selected_indices' is a set of option indices for multi_choice questions.
-    """
+    """Build the inline keyboard for any question type."""
     q = QUESTIONS[q_idx]
     keyboard = []
     selected_indices = selected_indices or set()
@@ -147,7 +131,7 @@ def build_keyboard(q_idx, step, selected_indices=None):
             ])
 
     elif q["type"] == "text":
-        # Purely free-text — no option buttons, only Back if applicable.
+        # Pure free-text — no option buttons needed.
         pass
 
     elif q["type"] == "multi_choice":
@@ -170,7 +154,7 @@ def build_keyboard(q_idx, step, selected_indices=None):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ── Resolve option text from index ────────────────────────────────────────────
+# ── Resolve option text from its index ────────────────────────────────────────
 
 def option_text(q_idx, opt_idx):
     """Return the display text for a given option index."""
@@ -187,7 +171,7 @@ def option_text(q_idx, opt_idx):
 async def _advance(target, context, current_step, now, *, is_message=False):
     """
     Move to the next step after an answer has been saved.
-    'target' is a CallbackQuery or a Message object.
+    'target' is a CallbackQuery or Message object.
     """
     question_order = context.user_data["question_order"]
     next_step = current_step + 1
@@ -232,9 +216,43 @@ async def _advance(target, context, current_step, now, *, is_message=False):
 # ── Command: /start ────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Entry point for every participant.
+
+    Randomly assigns the participant to one of two conditions:
+      - 'bot' → continues here in Telegram
+      - 'web' → redirected to the web survey URL
+
+    Both conditions are logged to the database immediately so you can
+    track how many participants were assigned to each arm.
+    """
     user = update.effective_user
     now = datetime.now()
 
+    # ── Random assignment ──────────────────────────────────────────────────
+    condition = random.choice(["bot", "web"])
+
+    # Log the assignment for both conditions
+    row_id = create_response_row(
+        user_id=user.id,
+        username=user.username or "",
+        first_name=user.first_name or "",
+        start_time=now.isoformat(),
+        condition=condition
+    )
+
+    # ── Web condition: redirect and exit ───────────────────────────────────
+    if condition == "web":
+        await update.message.reply_text(
+            f"Здравствуйте, {user.first_name}!\n\n"
+            "Вас приветствует социологический опрос (~10–15 минут).\n\n"
+            "🔒 Все ответы полностью анонимны.\n\n"
+            "Пожалуйста, пройдите опрос по ссылке ниже 👇\n\n"
+            f"{WEB_SURVEY_URL}"
+        )
+        return ConversationHandler.END
+
+    # ── Bot condition: run the full survey ─────────────────────────────────
     question_order = build_question_order()
 
     context.user_data["question_order"] = question_order
@@ -243,13 +261,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["question_times"] = {}  # {q_idx: seconds_spent}
     context.user_data["survey_start"] = now
     context.user_data["question_start"] = now
-
-    row_id = create_response_row(
-        user_id=user.id,
-        username=user.username or "",
-        first_name=user.first_name or "",
-        start_time=now.isoformat()
-    )
     context.user_data["row_id"] = row_id
 
     await update.message.reply_text(
@@ -282,7 +293,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("|")
     action = parts[0]
     now = datetime.now()
-
     question_order = context.user_data["question_order"]
 
     # ── BACK ──────────────────────────────────────────────────────────────
@@ -297,7 +307,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing = context.user_data["question_times"].get(current_q_idx, 0)
         context.user_data["question_times"][current_q_idx] = existing + elapsed
 
-        # Discard in-progress multi_choice selection on the step being left
+        # Discard any in-progress multi_choice selection on the step being left
         context.user_data.pop(f"mc_{current_step}", None)
 
         context.user_data["current_step"] = prev_step
@@ -323,7 +333,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return SURVEY
 
-    # ── TOGGLE multi_choice ───────────────────────────────────────────────
+    # ── TOGGLE multi_choice option ────────────────────────────────────────
     if action == "t":
         step = int(parts[1])
         opt_index = int(parts[2])
@@ -416,9 +426,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_step = context.user_data.get("current_step", 0)
 
     if not question_order:
-        await update.message.reply_text(
-            "Отправьте /start чтобы начать опрос."
-        )
+        await update.message.reply_text("Отправьте /start чтобы начать опрос.")
         return SURVEY
 
     q_idx = question_order[current_step]
@@ -477,14 +485,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Эта команда доступна только администратору.")
         return
 
-    completed, in_progress, avg_time = get_stats()
+    bot_completed, bot_started, web_redirected, avg_time = get_stats()
     avg_minutes = round(avg_time / 60, 1) if avg_time else 0
 
     await update.message.reply_text(
         f"📊 *Статистика опроса*\n\n"
-        f"✅ Завершено: *{completed}*\n"
-        f"🔄 В процессе: *{in_progress}*\n"
-        f"⏱ Среднее время заполнения: *{avg_minutes} мин.*",
+        f"🤖 *Бот*\n"
+        f"  ✅ Завершено: *{bot_completed}*\n"
+        f"  🔄 Начато, не завершено: *{bot_started}*\n\n"
+        f"🌐 *Веб-анкета*\n"
+        f"  ↗️ Перенаправлено: *{web_redirected}*\n\n"
+        f"⏱ Среднее время (бот): *{avg_minutes} мин.*",
         parse_mode="Markdown"
     )
 
