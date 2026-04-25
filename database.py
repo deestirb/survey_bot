@@ -10,8 +10,7 @@ DB_FILE = os.getenv("DB_FILE", "survey_results.db")
 def init_db():
     """
     Create the database and responses table if they don't exist yet.
-    Also runs any migrations needed for older databases (e.g. adding
-    the 'condition' column if it was created before that was added).
+    Also runs migrations for older databases.
     """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -38,12 +37,21 @@ def init_db():
         )
     """)
 
-    # ── Migrations: safely add any columns missing from older databases ────
+    # ── Migrations ─────────────────────────────────────────────────────────
+
     existing_cols = [row[1] for row in cursor.execute("PRAGMA table_info(responses)")]
 
+    # Migration 1: add condition column if missing
     if "condition" not in existing_cols:
         cursor.execute("ALTER TABLE responses ADD COLUMN condition TEXT")
         print("Migration: added 'condition' column.")
+
+    # Migration 2: backfill NULL conditions — rows recorded before the
+    # condition column existed are assumed to be bot responses
+    cursor.execute("UPDATE responses SET condition = 'bot' WHERE condition IS NULL")
+    updated = cursor.rowcount
+    if updated > 0:
+        print(f"Migration: backfilled {updated} NULL condition(s) to 'bot'.")
 
     conn.commit()
     conn.close()
