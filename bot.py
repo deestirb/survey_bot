@@ -41,6 +41,35 @@ ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
 # ↓ Paste the full URL of your web survey here
 WEB_SURVEY_URL = "https://www.oneclicksurvey.com/a/4b794b67"  # ← REPLACE WITH YOUR LINK
 
+async def debug2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM responses")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM responses WHERE completed = 1")
+    completed = cursor.fetchone()[0]
+
+    cursor.execute("SELECT DISTINCT condition FROM responses")
+    conditions = cursor.fetchall()
+
+    cursor.execute("SELECT id, condition, completed FROM responses LIMIT 5")
+    sample = cursor.fetchall()
+
+    conn.close()
+
+    await update.message.reply_text(
+        f"Total rows: `{total}`\n"
+        f"Completed: `{completed}`\n"
+        f"Distinct conditions: `{conditions}`\n"
+        f"Sample rows: `{sample}`",
+        parse_mode="Markdown"
+    )
+
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
@@ -610,6 +639,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("export", export))
     app.add_handler(CommandHandler("debug", debug))  # ← inside, before run_polling
+    app.add_handler(CommandHandler("debug2", debug2))
 
     print("Бот запущен...")
     app.run_polling()
