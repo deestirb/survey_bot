@@ -41,7 +41,36 @@ ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
 # ↓ Paste the full URL of your web survey here
 WEB_SURVEY_URL = "https://www.oneclicksurvey.com/a/4b794b67"  # ← REPLACE WITH YOUR LINK
 
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
 
+    import os
+
+    # Check what path the bot is using
+    db_path = DB_FILE
+    db_exists = os.path.exists(db_path)
+    db_size = os.path.getsize(db_path) if db_exists else 0
+
+    # Check what's in /data/
+    try:
+        data_contents = os.listdir("/data")
+    except Exception as e:
+        data_contents = [f"Error: {e}"]
+
+    # Check env variable
+    db_env = os.getenv("DB_FILE", "NOT SET")
+
+    await update.message.reply_text(
+        f"🔍 *Debug info*\n\n"
+        f"DB\\_FILE env: `{db_env}`\n"
+        f"DB\\_FILE used: `{db_path}`\n"
+        f"File exists: `{db_exists}`\n"
+        f"File size: `{db_size} bytes`\n\n"
+        f"/data contents: `{data_contents}`",
+        parse_mode="Markdown"
+    )
+    
 # ── Randomization: question order within matrix blocks ─────────────────────────
 
 def build_question_order():
@@ -580,6 +609,7 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("export", export))
+    app.add_handler(CommandHandler("debug", debug))  # ← inside, before run_polling
 
     print("Бот запущен...")
     app.run_polling()
