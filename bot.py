@@ -36,10 +36,10 @@ logger = logging.getLogger(__name__)
 SURVEY = 1
 
 # ↓ Your Telegram user ID — message @userinfobot on Telegram to find it
-ADMIN_USER_ID = 123456789  # ← REPLACE WITH YOUR TELEGRAM USER ID
+ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
 
 # ↓ Paste the full URL of your web survey here
-WEB_SURVEY_URL = "https://your-web-survey-link.com"  # ← REPLACE WITH YOUR LINK
+WEB_SURVEY_URL = "https://www.oneclicksurvey.com/a/4b794b67"  # ← REPLACE WITH YOUR LINK
 
 
 # ── Randomization: question order within matrix blocks ─────────────────────────
