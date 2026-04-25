@@ -650,6 +650,7 @@ def main():
     app.add_handler(CommandHandler("export", export))
     app.add_handler(CommandHandler("debug", debug))  # ← inside, before run_polling
     app.add_handler(CommandHandler("debug2", debug2))
+    app.add_handler(CommandHandler("debug3", debug3))
 
     print("Бот запущен...")
     app.run_polling()
