@@ -38,14 +38,14 @@ def init_db():
     """)
 
     # ── Migrations ─────────────────────────────────────────────────────────
-    # Re-read columns after CREATE TABLE in case it just ran
+    # Re-read columns after CREATE so migrations always work on the real state
     existing_cols = [row[1] for row in cursor.execute("PRAGMA table_info(responses)")]
 
     # Migration 1: add condition column if missing
     if "condition" not in existing_cols:
         cursor.execute("ALTER TABLE responses ADD COLUMN condition TEXT")
-        existing_cols.append("condition")
         print("Migration: added 'condition' column.")
+        existing_cols.append("condition")
 
     # Migration 2: backfill NULL conditions — rows recorded before the
     # condition column existed are assumed to be bot responses
@@ -54,17 +54,15 @@ def init_db():
     if updated > 0:
         print(f"Migration: backfilled {updated} NULL condition(s) to 'bot'.")
 
-    # Migration 3: add any question columns missing from older databases
-    # This handles cases where questions were added after the DB was created
+    # Migration 3: add any question columns that are missing
+    # (happens when questions.py grows after the DB was first created)
     for i in range(len(QUESTIONS)):
         q_num = i + 1
         if f"q{q_num}_answer" not in existing_cols:
             cursor.execute(f"ALTER TABLE responses ADD COLUMN q{q_num}_answer TEXT")
-            existing_cols.append(f"q{q_num}_answer")
             print(f"Migration: added q{q_num}_answer column.")
         if f"q{q_num}_seconds" not in existing_cols:
             cursor.execute(f"ALTER TABLE responses ADD COLUMN q{q_num}_seconds REAL")
-            existing_cols.append(f"q{q_num}_seconds")
             print(f"Migration: added q{q_num}_seconds column.")
 
     conn.commit()
