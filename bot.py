@@ -1,9 +1,12 @@
 # bot.py
+import io
 import os
+import sqlite3
 import random
 import logging
 from datetime import datetime
 
+import pandas as pd
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,7 +20,7 @@ from telegram.ext import (
 )
 
 from questions import QUESTIONS, RANDOMIZE_GROUPS
-from database import init_db, create_response_row, save_answer, finalize_response, get_stats
+from database import DB_FILE, init_db, create_response_row, save_answer, finalize_response, get_stats
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
@@ -33,10 +36,10 @@ logger = logging.getLogger(__name__)
 SURVEY = 1
 
 # ↓ Your Telegram user ID — message @userinfobot on Telegram to find it
-ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
+ADMIN_USER_ID = 123456789  # ← REPLACE WITH YOUR TELEGRAM USER ID
 
 # ↓ Paste the full URL of your web survey here
-WEB_SURVEY_URL = "https://www.oneclicksurvey.com/a/4b794b67"  # ← REPLACE WITH YOUR LINK
+WEB_SURVEY_URL = "https://your-web-survey-link.com"  # ← REPLACE WITH YOUR LINK
 
 
 # ── Randomization: question order within matrix blocks ─────────────────────────
@@ -124,15 +127,13 @@ def build_keyboard(q_idx, step, selected_indices=None):
         keyboard.append(row)
 
     elif q["type"] == "integer":
-        # User types the number; only show fallback escape buttons.
         for oi, option in enumerate(q.get("fallback_options", [])):
             keyboard.append([
                 InlineKeyboardButton(option, callback_data=f"a|{step}|{oi}")
             ])
 
     elif q["type"] == "text":
-        # Pure free-text — no option buttons needed.
-        pass
+        pass  # pure free-text, no buttons needed
 
     elif q["type"] == "multi_choice":
         for oi, option in enumerate(q["options"]):
@@ -145,7 +146,6 @@ def build_keyboard(q_idx, step, selected_indices=None):
                 InlineKeyboardButton("✅  Подтвердить выбор", callback_data=f"c|{step}")
             ])
 
-    # Back button on every step except the very first
     if step > 0:
         keyboard.append([
             InlineKeyboardButton("← Назад", callback_data=f"b|{step}")
@@ -178,7 +178,6 @@ async def _advance(target, context, current_step, now, *, is_message=False):
     context.user_data["current_step"] = next_step
     context.user_data["question_start"] = now
 
-    # ── Survey complete ────────────────────────────────────────────────────
     if next_step >= len(question_order):
         total_seconds = (now - context.user_data["survey_start"]).total_seconds()
         total_minutes = round(total_seconds / 60, 1)
@@ -200,7 +199,6 @@ async def _advance(target, context, current_step, now, *, is_message=False):
             await target.edit_message_text(completion_text, parse_mode="Markdown")
         return ConversationHandler.END
 
-    # ── Show next question ─────────────────────────────────────────────────
     next_q_idx = question_order[next_step]
     text = build_question_text(next_q_idx, next_step, len(question_order))
     kb = build_keyboard(next_q_idx, next_step)
@@ -218,21 +216,14 @@ async def _advance(target, context, current_step, now, *, is_message=False):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Entry point for every participant.
-
-    Randomly assigns the participant to one of two conditions:
-      - 'bot' → continues here in Telegram
-      - 'web' → redirected to the web survey URL
-
-    Both conditions are logged to the database immediately so you can
-    track how many participants were assigned to each arm.
+    Randomly assigns to 'bot' or 'web' condition.
+    Both assignments are logged to the database immediately.
     """
     user = update.effective_user
     now = datetime.now()
 
-    # ── Random assignment ──────────────────────────────────────────────────
     condition = random.choice(["bot", "web"])
 
-    # Log the assignment for both conditions
     row_id = create_response_row(
         user_id=user.id,
         username=user.username or "",
@@ -257,8 +248,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["question_order"] = question_order
     context.user_data["current_step"] = 0
-    context.user_data["answers"] = {}         # {q_idx: answer_text}
-    context.user_data["question_times"] = {}  # {q_idx: seconds_spent}
+    context.user_data["answers"] = {}
+    context.user_data["question_times"] = {}
     context.user_data["survey_start"] = now
     context.user_data["question_start"] = now
     context.user_data["row_id"] = row_id
@@ -302,21 +293,16 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_q_idx = question_order[current_step]
         prev_q_idx = question_order[prev_step]
 
-        # Accumulate time on the step being left
         elapsed = (now - context.user_data.get("question_start", now)).total_seconds()
         existing = context.user_data["question_times"].get(current_q_idx, 0)
         context.user_data["question_times"][current_q_idx] = existing + elapsed
-
-        # Discard any in-progress multi_choice selection on the step being left
         context.user_data.pop(f"mc_{current_step}", None)
-
         context.user_data["current_step"] = prev_step
         context.user_data["question_start"] = now
 
         prev_answer = context.user_data["answers"].get(prev_q_idx)
         extra = f"\n\n_Ваш предыдущий ответ: *{prev_answer}*_" if prev_answer else ""
 
-        # Restore tick state if going back to a multi_choice question
         prev_q = QUESTIONS[prev_q_idx]
         selected_indices = set()
         if prev_q["type"] == "multi_choice" and prev_answer:
@@ -333,7 +319,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return SURVEY
 
-    # ── TOGGLE multi_choice option ────────────────────────────────────────
+    # ── TOGGLE multi_choice ───────────────────────────────────────────────
     if action == "t":
         step = int(parts[1])
         opt_index = int(parts[2])
@@ -395,7 +381,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return await _advance(query, context, step, now)
 
-    # ── SINGLE ANSWER (choice / scale / integer fallback) ─────────────────
+    # ── SINGLE ANSWER ─────────────────────────────────────────────────────
     if action == "a":
         step = int(parts[1])
         opt_index = int(parts[2])
@@ -432,7 +418,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q_idx = question_order[current_step]
     q = QUESTIONS[q_idx]
 
-    # ── "integer" type ────────────────────────────────────────────────────
     if q["type"] == "integer":
         raw = update.message.text.strip()
         if not raw.isdigit() or int(raw) <= 0:
@@ -444,7 +429,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return SURVEY
         answer = raw
 
-    # ── "text" type ───────────────────────────────────────────────────────
     elif q["type"] == "text":
         answer = update.message.text.strip()
         if not answer:
@@ -453,7 +437,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return SURVEY
 
-    # ── Any other type: remind to use buttons ─────────────────────────────
     else:
         await update.message.reply_text(
             "Пожалуйста, используйте кнопки для ответа на этот вопрос. "
@@ -500,6 +483,70 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ── Command: /export (admin only) ─────────────────────────────────────────────
+
+async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Export the full responses table as a CSV file sent directly in Telegram.
+    Only available to the admin user.
+    Usage: send /export to the bot — it replies with survey_results.csv.
+    Optional: /export bot   → only bot condition rows
+              /export web   → only web condition rows
+    """
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    # Optional filter argument: /export bot  or  /export web
+    args = context.args
+    condition_filter = args[0].lower() if args else None
+
+    await update.message.reply_text("⏳ Подготавливаю файл...")
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+
+        if condition_filter in ("bot", "web"):
+            df = pd.read_sql(
+                "SELECT * FROM responses WHERE condition = ?",
+                conn,
+                params=(condition_filter,)
+            )
+            filename = f"survey_{condition_filter}.csv"
+        else:
+            df = pd.read_sql("SELECT * FROM responses", conn)
+            filename = "survey_results.csv"
+
+        conn.close()
+
+        if df.empty:
+            await update.message.reply_text("База данных пуста — ответов пока нет.")
+            return
+
+        # Write to an in-memory buffer so we never touch the filesystem
+        buffer = io.BytesIO()
+        df.to_csv(buffer, index=False, encoding="utf-8-sig")  # utf-8-sig for Excel compatibility
+        buffer.seek(0)
+
+        bot_rows = len(df[df["condition"] == "bot"]) if "condition" in df.columns else "?"
+        web_rows = len(df[df["condition"] == "web"]) if "condition" in df.columns else "?"
+
+        await update.message.reply_document(
+            document=buffer,
+            filename=filename,
+            caption=(
+                f"📄 *{filename}*\n\n"
+                f"Всего строк: *{len(df)}*\n"
+                f"Бот: *{bot_rows}* | Веб: *{web_rows}*"
+            ),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        await update.message.reply_text(f"❌ Ошибка при экспорте:\n`{e}`", parse_mode="Markdown")
+
+
 # ── Command: /cancel ──────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -532,6 +579,7 @@ def main():
 
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("export", export))
 
     print("Бот запущен...")
     app.run_polling()

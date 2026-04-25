@@ -10,8 +10,7 @@ DB_FILE = os.getenv("DB_FILE", "survey_results.db")
 def init_db():
     """
     Create the database and responses table if they don't exist yet.
-    Also runs any migrations needed for older databases (e.g. adding
-    the 'condition' column if it was created before that was added).
+    Also runs all migrations for older databases.
     """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -38,12 +37,35 @@ def init_db():
         )
     """)
 
-    # ── Migrations: safely add any columns missing from older databases ────
+    # ── Migrations ─────────────────────────────────────────────────────────
+    # Re-read columns after CREATE TABLE in case it just ran
     existing_cols = [row[1] for row in cursor.execute("PRAGMA table_info(responses)")]
 
+    # Migration 1: add condition column if missing
     if "condition" not in existing_cols:
         cursor.execute("ALTER TABLE responses ADD COLUMN condition TEXT")
+        existing_cols.append("condition")
         print("Migration: added 'condition' column.")
+
+    # Migration 2: backfill NULL conditions — rows recorded before the
+    # condition column existed are assumed to be bot responses
+    cursor.execute("UPDATE responses SET condition = 'bot' WHERE condition IS NULL")
+    updated = cursor.rowcount
+    if updated > 0:
+        print(f"Migration: backfilled {updated} NULL condition(s) to 'bot'.")
+
+    # Migration 3: add any question columns missing from older databases
+    # This handles cases where questions were added after the DB was created
+    for i in range(len(QUESTIONS)):
+        q_num = i + 1
+        if f"q{q_num}_answer" not in existing_cols:
+            cursor.execute(f"ALTER TABLE responses ADD COLUMN q{q_num}_answer TEXT")
+            existing_cols.append(f"q{q_num}_answer")
+            print(f"Migration: added q{q_num}_answer column.")
+        if f"q{q_num}_seconds" not in existing_cols:
+            cursor.execute(f"ALTER TABLE responses ADD COLUMN q{q_num}_seconds REAL")
+            existing_cols.append(f"q{q_num}_seconds")
+            print(f"Migration: added q{q_num}_seconds column.")
 
     conn.commit()
     conn.close()
