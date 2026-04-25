@@ -41,6 +41,16 @@ ADMIN_USER_ID = 5213267043  # ← REPLACE WITH YOUR TELEGRAM USER ID
 # ↓ Paste the full URL of your web survey here
 WEB_SURVEY_URL = "https://www.oneclicksurvey.com/a/4b794b67"  # ← REPLACE WITH YOUR LINK
 
+async def debug3(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    import subprocess
+    result = subprocess.run(
+        ["find", "/", "-name", "*.db", "-not", "-path", "*/proc/*"],
+        capture_output=True, text=True, timeout=10
+    )
+    await update.message.reply_text(f"Found db files:\n`{result.stdout}`", parse_mode="Markdown")
+
 async def debug2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
